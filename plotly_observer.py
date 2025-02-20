@@ -330,17 +330,22 @@ class PlotlyObserver:
             for trade in all_trades:
                 print(f"日期：{trade['date']}，价格：{trade['price']:.3f}，数量：{trade['size']}，{trade['type']}")
             
+            # 在添加仓位图表之前，计算合适的刻度
+            max_position = max(self.positions) if self.positions else 0
+            min_position = min(self.positions) if self.positions else 0
+            position_ticks = self.get_nice_ticks(min_position, max_position)
+
             # 添加仓位面积图
             fig.add_trace(
                 go.Scatter(
                     x=df.index,
                     y=self.positions,
-                    fill='tozeroy',  # 填充到0轴
+                    fill='tozeroy',
                     name='持仓数量',
                     showlegend=False,
-                    line=dict(color='rgba(0, 100, 180, 0.3)'),  # 半透明的蓝色
-                    fillcolor='rgba(0, 100, 180, 0.1)',  # 更淡的填充色
-                    hovertemplate='持仓: %{y:d}股<extra></extra>'  # 使用整数格式 (:d)
+                    line=dict(color='rgba(0, 100, 180, 0.3)'),
+                    fillcolor='rgba(0, 100, 180, 0.1)',
+                    hovertemplate='持仓: %{y:~s}股<extra></extra>'  # 使用SI格式
                 ),
                 row=3, col=1
             )
@@ -435,8 +440,12 @@ class PlotlyObserver:
                 yaxis2=dict(fixedrange=True),  # 禁止y轴缩放
                 yaxis3=dict(
                     fixedrange=True,  # 禁止y轴缩放
-                    tickformat='d',   # 使用整数格式
-                    dtick=100        # 设置刻度间隔为100
+                    tickformat='~s',  # 使用SI格式 (k, M, G等)
+                    tickmode='array',  # 使用自定义刻度
+                    tickvals=position_ticks,  # 设置刻度值
+                    ticktext=[f'{int(x):,}' for x in position_ticks],  # 格式化刻度标签
+                    separatethousands=True,  # 添加千位分隔符
+                    range=[min_position * 0.9, max_position * 1.1]  # 稍微扩大范围，使图表更美观
                 ),
                 yaxis4=dict(fixedrange=True),  # 禁止y轴缩放
                 bargap=0.2,
@@ -590,3 +599,21 @@ class PlotlyObserver:
                 self.winning_trades.append(trade_profit)
             else:
                 self.losing_trades.append(trade_profit) 
+
+    def get_nice_ticks(self, min_val, max_val, n_ticks=4):
+        """生成合适的刻度"""
+        range_val = max_val - min_val
+        if range_val == 0:
+            return [min_val]
+        
+        # 计算合适的刻度间隔
+        tick_size = range_val / (n_ticks - 1)
+        # 将tick_size转换为"整数"，如1000, 2000, 5000等
+        magnitude = 10 ** np.floor(np.log10(tick_size))
+        possible_ticks = [1, 2, 5, 10]
+        tick_size = magnitude * min([x for x in possible_ticks if x * magnitude >= tick_size])
+        
+        # 生成刻度值
+        start = np.floor(min_val / tick_size) * tick_size
+        ticks = np.arange(start, max_val + tick_size, tick_size)
+        return ticks 

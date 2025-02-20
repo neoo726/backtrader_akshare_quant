@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import backtrader as bt
 import akshare as ak
 import pandas as pd
@@ -8,14 +8,18 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 # 从strategies包导入策略
-from strategies import MACrossStrategy
+from strategies import MACrossStrategy, GridStrategy
 from config import BACKTEST_CONFIG, DATA_CONFIG
 
 #plt.rcParams["font.sans-serif"] = ["SimHei"]
 #plt.rcParams["axes.unicode_minus"] = False
-# 设置日期范围
+# 设置日期范围，为了计算指标，获取额外30天的历史数据
 start_date = datetime(2024, 6, 16)  # 回测开始时间
 end_date = datetime(2025, 2, 16)  # 回测结束时间
+
+# 计算数据获取的实际开始日期（回测开始日期前30天）
+data_start_date = BACKTEST_CONFIG['start_date'] - timedelta(days=30)
+
 # 利用 AKShare 获取股票的后复权数据，这里只获取前 7 列
 stock_hfq_df = ak.fund_etf_hist_em(
     symbol=DATA_CONFIG['stock_code'], 
@@ -49,9 +53,9 @@ benchmark_df.columns = [
 # 把 date 作为日期索引，以符合 Backtrader 的要求
 benchmark_df.index = pd.to_datetime(benchmark_df['date'])
 
-# 截取日期范围
-stock_hfq_df = stock_hfq_df.loc[start_date:end_date]
-benchmark_df = benchmark_df.loc[start_date:end_date]
+# 截取日期范围时使用不同的日期
+stock_hfq_df = stock_hfq_df.loc[data_start_date:BACKTEST_CONFIG['end_date']]
+benchmark_df = benchmark_df.loc[data_start_date:BACKTEST_CONFIG['end_date']]
 print('stock_hfq_df',stock_hfq_df)
 print('benchmark_df',benchmark_df)
 
@@ -66,11 +70,11 @@ print(stock_hfq_df.head(20))
 # Create and update the Plotly observer
 observer = PlotlyObserver()
 
-# 准备数据
+# 准备数据时使用回测的实际开始日期
 data = bt.feeds.PandasData(
     dataname=stock_hfq_df,
     datetime=None,
-    fromdate=BACKTEST_CONFIG['start_date'],
+    fromdate=BACKTEST_CONFIG['start_date'],  # 实际回测开始日期
     todate=BACKTEST_CONFIG['end_date']
 )
 
@@ -86,7 +90,7 @@ cerebro.broker.setcommission(commission=BACKTEST_CONFIG['commission_rate'])
 
 # 添加策略，同时传入观察者和基准数据
 cerebro.addstrategy(
-    MACrossStrategy,
+    GridStrategy,  # 使用网格策略
     observer=observer,
     benchmark_df=benchmark_df
 )

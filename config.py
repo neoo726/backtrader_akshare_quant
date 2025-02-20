@@ -2,8 +2,8 @@ from datetime import datetime
 
 # 回测配置
 BACKTEST_CONFIG = {
-    'start_date': datetime(2024, 6, 16),
-    'end_date': datetime(2025, 2, 16),
+    'start_date': datetime(2023, 6, 16),
+    'end_date': datetime(2024, 2, 16),
     'initial_cash': 15000,
     'commission_rate': 0.00005,  # 0.5‰
     'slippage': 0.0001,  # 滑点 0.1‰

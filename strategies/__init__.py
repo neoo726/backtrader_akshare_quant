@@ -2,5 +2,6 @@
 
 from .base_strategy import BaseStrategy
 from .ma_cross_strategy import MACrossStrategy
+from .grid_strategy import GridStrategy
 
-__all__ = ['BaseStrategy', 'MACrossStrategy'] 
+__all__ = ['BaseStrategy', 'MACrossStrategy', 'GridStrategy'] 
