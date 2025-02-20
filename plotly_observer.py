@@ -25,9 +25,28 @@ class PlotlyObserver:
         self.winning_trades = []  # 盈利交易
         self.losing_trades = []   # 亏损交易
         
+        # 添加 OHLC 数据存储
+        self.open_prices = []
+        self.high_prices = []
+        self.low_prices = []
+        
+        # 添加交易信号存储
+        self.buy_signals = {'dates': [], 'prices': []}
+        self.sell_signals = {'dates': [], 'prices': []}
+        
+        # 添加仓位记录
+        self.positions = []  # 记录每日仓位
+        
     def update(self, strategy, benchmark_df):
         try:
             current_date = strategy.data.datetime.date(0)
+             # 将当前日期转换为 pandas Timestamp 以确保格式匹配
+            current_date_ts = pd.Timestamp(current_date)
+        
+            # 调试信息
+            print(f"Updating for date: {current_date}")
+            print(f"Benchmark index type: {type(benchmark_df.index[0])}")
+            print(f"Current date type: {type(current_date_ts)}")
             
             # 更新基础数据
             self.dates.append(current_date)
@@ -39,18 +58,11 @@ class PlotlyObserver:
             self.portfolio_values.append(current_value)
             
             # 更新基准数据
-            if current_date in benchmark_df.index:
-                benchmark_price = benchmark_df.loc[current_date, 'close']
-                if self.initial_benchmark_value is None:
-                    self.initial_benchmark_value = benchmark_price
-                self.benchmark_values.append(benchmark_price)
-            else:
-                # 如果当前日期不在基准数据中，使用最近的有效值
-                if len(self.benchmark_values) > 0:
-                    self.benchmark_values.append(self.benchmark_values[-1])
-                else:
-                    self.benchmark_values.append(None)
-            
+            benchmark_price = benchmark_df.loc[current_date_ts, 'close']
+            if self.initial_benchmark_value is None:
+                self.initial_benchmark_value = benchmark_price
+            self.benchmark_values.append(benchmark_price)
+            print(f"Added benchmark value: {benchmark_price}")
             # 计算每日收益
             if len(self.portfolio_values) > 1:
                 # 策略收益
@@ -69,13 +81,14 @@ class PlotlyObserver:
                 self.daily_pnl.append(0)
                 self.benchmark_returns.append(0)
                 
-            # 更新交易统计
-            if strategy.order and strategy.order.status == strategy.order.Completed:
-                trade_profit = strategy.order.executed.pnl
-                if trade_profit > 0:
-                    self.winning_trades.append(trade_profit)
-                else:
-                    self.losing_trades.append(trade_profit)
+            # 添加 OHLC 数据收集
+            self.open_prices.append(strategy.data.open[0])
+            self.high_prices.append(strategy.data.high[0])
+            self.low_prices.append(strategy.data.low[0])
+            
+            # 记录仓位，直接使用持仓数量
+            current_position = strategy.position.size if strategy.position else 0
+            self.positions.append(current_position)
         except Exception as e:
             print(f"Error in update: {str(e)}")
             raise
@@ -161,16 +174,34 @@ class PlotlyObserver:
         try:
             metrics = self.calculate_metrics()
             
-            # 创建子图
+            # 创建连续的交易日期序列
+            df = pd.DataFrame({
+                'date': self.dates,
+                'open': self.open_prices,
+                'high': self.high_prices,
+                'low': self.low_prices,
+                'close': self.close_prices,
+                'daily_pnl': self.daily_pnl,
+                'portfolio_value': self.portfolio_values
+            })
+            
+            # 设置日期索引并按日期排序
+            df.set_index('date', inplace=True)
+            df.sort_index(inplace=True)
+            
+            # 创建四行子图，调整间距
             fig = make_subplots(
-                rows=2, cols=1,
+                rows=4, cols=1,  # 改为4行
                 vertical_spacing=0.12,
-                row_heights=[0.7, 0.3],
-                specs=[[{"secondary_y": False}], [{"secondary_y": False}]]
+                row_heights=[0.3, 0.3, 0.2, 0.2],  # 调整每个子图的高度比例
+                specs=[[{"secondary_y": False}], 
+                      [{"secondary_y": False}],
+                      [{"secondary_y": False}],
+                      [{"secondary_y": False}]]
             )
             
             # 计算累积收益
-            cumulative_returns = [v/self.portfolio_values[0] - 1 for v in self.portfolio_values] if self.portfolio_values else []
+            cumulative_returns = [v/self.portfolio_values[0] - 1 for v in self.portfolio_values]
             
             # 计算基准累积收益
             valid_benchmark_values = [v for v in self.benchmark_values if v is not None]
@@ -180,44 +211,270 @@ class PlotlyObserver:
             if benchmark_cum_returns:
                 fig.add_trace(
                     go.Scatter(
-                        x=self.dates[:len(benchmark_cum_returns)],
+                        x=df.index,
                         y=benchmark_cum_returns,
                         mode='lines',
                         name='沪深300',
                         line=dict(color='darkred', width=1.5),
-                        showlegend=True
+                        connectgaps=True,
+                        showlegend=True,
+                        legendgroup='strategy'
                     ),
                     row=1, col=1
                 )
             
             # 添加策略收益曲线（蓝黑色）
-            if cumulative_returns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=cumulative_returns,
+                    mode='lines',
+                    name='策略收益',
+                    line=dict(color='rgb(0, 0, 139)', width=2),
+                    connectgaps=True,
+                    showlegend=True,
+                    legendgroup='strategy'
+                ),
+                row=1, col=1
+            )
+            
+            # 添加K线图，移除legend
+            fig.add_trace(
+                go.Candlestick(
+                    x=df.index,
+                    open=df['open'],
+                    high=df['high'],
+                    low=df['low'],
+                    close=df['close'],
+                    increasing_line_color='red',
+                    decreasing_line_color='green',
+                    showlegend=False,
+                    xperiod='D1',  # 设置时间周期为1天
+                    xperiodalignment='middle',  # 将对齐方式改为middle
+                    hovertext=[f'开盘: {o:.2f}<br>最高: {h:.2f}<br>最低: {l:.2f}<br>收盘: {c:.2f}'
+                              for o, h, l, c in zip(df['open'], df['high'], df['low'], df['close'])],
+                    hoverlabel=dict(
+                        bgcolor='white',
+                        font_size=12,
+                        font_family="Arial"
+                    ),
+                    hoverinfo='text+x',
+                    legendgroup='kline'  # 添加legendgroup
+                ),
+                row=2, col=1
+            )
+            
+            # 在添加K线图后，添加买卖点标记
+            # 添加买入点（红色三角形，显示在K线上方）
+            if self.buy_signals['dates']:
                 fig.add_trace(
                     go.Scatter(
-                        x=self.dates,
-                        y=cumulative_returns,
-                        mode='lines',
-                        name='策略收益',
-                        line=dict(color='rgb(0, 0, 139)', width=2),
-                        showlegend=True
+                        x=self.buy_signals['dates'],
+                        y=[df.loc[date, 'high'] * 1.03 for date in self.buy_signals['dates']],
+                        mode='markers',
+                        name='买入',
+                        marker=dict(
+                            symbol='triangle-down',
+                            size=12,
+                            color='red',
+                        ),
+                        showlegend=False,
                     ),
-                    row=1, col=1
+                    row=2, col=1
                 )
-            
-            # 添加每日盈亏柱状图（红色表示盈利，绿色表示亏损）
-            if self.daily_pnl:
+
+            # 添加卖出点（绿色三角形，显示在K线下方）
+            if self.sell_signals['dates']:
                 fig.add_trace(
-                    go.Bar(
-                        x=self.dates,
-                        y=self.daily_pnl,
-                        name='每日盈亏',
-                        marker_color=['red' if x > 0 else 'green' for x in self.daily_pnl],
-                        showlegend=False
+                    go.Scatter(
+                        x=self.sell_signals['dates'],
+                        y=[df.loc[date, 'low'] * 0.97 for date in self.sell_signals['dates']],
+                        mode='markers',
+                        name='卖出',
+                        marker=dict(
+                            symbol='triangle-up',
+                            size=12,
+                            color='green',
+                        ),
+                        showlegend=False,
                     ),
                     row=2, col=1
                 )
             
-            # 定义指标及其位置
+            # 收集所有交易记录并按日期排序
+            all_trades = []
+            
+            # 添加买入记录
+            for date, price in zip(self.buy_signals['dates'], self.buy_signals['prices']):
+                all_trades.append({
+                    'date': date,
+                    'price': price,
+                    'type': '买入',
+                    'size': 100
+                })
+                
+            # 添加卖出记录
+            for date, price in zip(self.sell_signals['dates'], self.sell_signals['prices']):
+                all_trades.append({
+                    'date': date,
+                    'price': price,
+                    'type': '卖出',
+                    'size': 100
+                })
+            
+            # 按日期排序
+            all_trades.sort(key=lambda x: x['date'])
+            
+            # 打印排序后的交易记录
+            print("\n交易记录:")
+            for trade in all_trades:
+                print(f"日期：{trade['date']}，价格：{trade['price']:.3f}，数量：{trade['size']}，{trade['type']}")
+            
+            # 添加仓位面积图
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=self.positions,
+                    fill='tozeroy',  # 填充到0轴
+                    name='持仓数量',
+                    showlegend=False,
+                    line=dict(color='rgba(0, 100, 180, 0.3)'),  # 半透明的蓝色
+                    fillcolor='rgba(0, 100, 180, 0.1)',  # 更淡的填充色
+                    hovertemplate='持仓: %{y:d}股<extra></extra>'  # 使用整数格式 (:d)
+                ),
+                row=3, col=1
+            )
+            
+            # 每日盈亏柱状图移到第4行
+            fig.add_trace(
+                go.Bar(
+                    x=df.index,
+                    y=df['daily_pnl'],
+                    name='每日盈亏',
+                    marker_color=['red' if x > 0 else 'green' for x in df['daily_pnl']],
+                    showlegend=False
+                ),
+                row=4, col=1
+            )
+            
+            # 计算日期范围并选择显示格式
+            date_range = (df.index[-1] - df.index[0]).days
+            
+            # 根据日期范围选择显示格式和间隔
+            if date_range > 365 * 1.5:  # 如果超过1.5年，只显示年份
+                date_format = '%Y'
+                interval = 20  # 增加间隔
+            else:  # 否则显示年月
+                date_format = '%Y-%m'
+                interval = 10  # 较小的间隔
+
+            # 创建日期标签
+            date_indices = list(range(0, len(df.index), interval))
+            if len(df.index) - 1 not in date_indices:  # 确保包含最后一个日期
+                date_indices.append(len(df.index) - 1)
+            
+            date_labels = []
+            filtered_indices = []
+            last_label = None
+            
+            for idx in date_indices:
+                current_label = df.index[idx].strftime(date_format)
+                if current_label != last_label:  # 只添加不重复的标签
+                    date_labels.append(current_label)
+                    filtered_indices.append(idx)
+                    last_label = current_label
+
+            # 更新布局
+            fig.update_layout(
+                height=1200,  # 增加总高度
+                showlegend=True,
+                hovermode='x unified',
+                margin=dict(t=150),
+                # 统一所有x轴的设置
+                xaxis=dict(
+                    type="category",
+                    rangeslider_visible=False,  # 隐藏范围滑块
+                    tickmode='array',
+                    ticktext=date_labels,
+                    tickvals=filtered_indices,
+                    tickangle=45,
+                    range=[-0.5, len(df.index) - 0.5],
+                    fixedrange=True  # 禁止缩放
+                ),
+                xaxis2=dict(
+                    type="category",
+                    rangeslider=dict(visible=False),  # 隐藏范围滑块
+                    tickmode='array',
+                    ticktext=date_labels,
+                    tickvals=filtered_indices,
+                    tickangle=45,
+                    range=[-0.5, len(df.index) - 0.5],
+                    fixedrange=True  # 禁止缩放
+                ),
+                xaxis3=dict(
+                    type="category",
+                    rangeslider_visible=False,  # 隐藏范围滑块
+                    tickmode='array',
+                    ticktext=date_labels,
+                    tickvals=filtered_indices,
+                    tickangle=45,
+                    range=[-0.5, len(df.index) - 0.5],
+                    fixedrange=True  # 禁止缩放
+                ),
+                xaxis4=dict(
+                    type="category",
+                    rangeslider_visible=False,  # 隐藏范围滑块
+                    tickmode='array',
+                    ticktext=date_labels,
+                    tickvals=filtered_indices,
+                    tickangle=45,
+                    range=[-0.5, len(df.index) - 0.5],
+                    fixedrange=True  # 禁止缩放
+                ),
+                yaxis=dict(fixedrange=True),  # 禁止y轴缩放
+                yaxis2=dict(fixedrange=True),  # 禁止y轴缩放
+                yaxis3=dict(
+                    fixedrange=True,  # 禁止y轴缩放
+                    tickformat='d',   # 使用整数格式
+                    dtick=100        # 设置刻度间隔为100
+                ),
+                yaxis4=dict(fixedrange=True),  # 禁止y轴缩放
+                bargap=0.2,
+                bargroupgap=0.1,
+                # 禁用所有模式栏按钮
+                modebar=dict(
+                    remove=['zoom', 'pan', 'select', 'lasso2d', 'zoomIn2d', 'zoomOut2d', 
+                            'autoScale2d', 'resetScale2d', 'hoverClosestCartesian',
+                            'hoverCompareCartesian', 'toggleSpikelines']
+                ),
+                # 修改图例设置，将第一个图例（策略收益相关）放在第一个子图的右上角
+                legend=dict(
+                    y=0.98,  # 调整到更靠近折线图顶部
+                    x=0.98,
+                    xanchor='right',
+                    yanchor='top',
+                    bgcolor='rgba(255, 255, 255, 0.8)',
+                    bordercolor='rgba(0, 0, 0, 0.3)',
+                    borderwidth=1,
+                    font=dict(size=10)  # 可以适当减小字体大小
+                ),
+            )
+
+            # 更新所有x轴的显示设置
+            fig.update_xaxes(
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='lightgrey',
+                showline=True,
+                linewidth=1,
+                linecolor='black',
+                mirror=True,
+                rangebreaks=[dict(bounds=["sat", "mon"])],  # 去除周末
+                dtick="M1",  # 按月显示刻度
+                range=[-0.5, len(df.index) - 0.5]  # 确保从最左侧开始显示
+            )
+            
+            # 添加指标注释
             metrics_info = [
                 ('策略收益', f"{metrics['total_return']:.2%}", 0.02, True),
                 ('基准收益', f"{metrics['benchmark_return']:.2%}", 0.10, True),
@@ -232,12 +489,11 @@ class PlotlyObserver:
                 ('夏普比率', f"{metrics['sharpe_ratio']:.2f}", 0.82, False)
             ]
             
-            # 添加指标注释
             annotations = []
             for title, value, x_pos, use_color in metrics_info:
                 # 确定颜色逻辑
                 if use_color:
-                    if float(value.strip('%').strip('-')) == 0:  # 对于百分比和非百分比都适用
+                    if float(value.strip('%').strip('-')) == 0:
                         color = 'black'
                     else:
                         is_negative = '-' in str(value)
@@ -245,19 +501,21 @@ class PlotlyObserver:
                 else:
                     color = 'black'
                 
+                # 修改指标值的位置和字体大小
                 annotations.append(dict(
                     x=x_pos,
-                    y=1.12,
+                    y=1.10,  # 将y位置从1.12改为1.10
                     xref="paper",
                     yref="paper",
                     text=value,
                     showarrow=False,
-                    font=dict(size=20, color=color),
+                    font=dict(size=16, color=color),  # 将字体大小从20改为16
                     align='center',
                 ))
+                # 修改指标标题的位置
                 annotations.append(dict(
                     x=x_pos,
-                    y=1.06,
+                    y=1.05,  # 将y位置从1.06改为1.05
                     xref="paper",
                     yref="paper",
                     text=title,
@@ -268,30 +526,67 @@ class PlotlyObserver:
             
             # 更新布局
             fig.update_layout(
-                height=800,
+                height=1200,  # 增加总高度
                 showlegend=True,
                 hovermode='x unified',
                 margin=dict(t=150),
                 annotations=annotations,
                 yaxis_tickformat='.2%',
                 yaxis2_tickformat='.0f',
-                legend=dict(
-                    y=0.98,
-                    x=0.98,
-                    xanchor='right',
-                    yanchor='top',
-                    bgcolor='rgba(255, 255, 255, 0.8)',
-                    bordercolor='rgba(0, 0, 0, 0.3)',
-                    borderwidth=1,
-                    tracegroupgap=5
-                )
+                yaxis4_tickformat='.0f',
             )
             
             # 更新y轴标题
             fig.update_yaxes(title_text="累积收益率", row=1, col=1)
-            fig.update_yaxes(title_text="每日盈亏", row=2, col=1)
+            fig.update_yaxes(title_text="K线", row=2, col=1)
+            fig.update_yaxes(title_text="持仓数量(股)", row=3, col=1)
+            fig.update_yaxes(title_text="每日盈亏", row=4, col=1)
+            
+            # 添加20日均线到K线图
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=self.sma_values,
+                    mode='lines',
+                    name='20日均线',
+                    line=dict(
+                        color='blue',
+                        width=1,
+                        dash='solid'
+                    ),
+                    showlegend=False,
+                ),
+                row=2, col=1
+            )
             
             fig.show()
         except Exception as e:
             print(f"Error in plot: {str(e)}")
             raise 
+
+    def add_trade_signal(self, date, price, is_buy):
+        """添加交易信号
+        
+        Args:
+            date: 交易日期
+            price: 交易价格
+            is_buy: 是否为买入信号
+        """
+        if is_buy:
+            self.buy_signals['dates'].append(date)
+            self.buy_signals['prices'].append(price)
+        else:
+            self.sell_signals['dates'].append(date)
+            self.sell_signals['prices'].append(price)
+
+        # 统一格式打印交易记录
+        print(f"日期：{date}，价格：{price:.3f}，数量：100，{'买入' if is_buy else '卖出'}")
+
+        # 计算交易盈亏
+        if not is_buy and len(self.buy_signals['prices']) > 0:
+            last_buy_price = self.buy_signals['prices'][-1]
+            trade_profit = (price - last_buy_price) * 100  # 假设数量固定为100
+            if trade_profit > 0:
+                self.winning_trades.append(trade_profit)
+            else:
+                self.losing_trades.append(trade_profit) 
