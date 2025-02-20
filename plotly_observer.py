@@ -37,6 +37,9 @@ class PlotlyObserver:
         # 添加仓位记录
         self.positions = []  # 记录每日仓位
         
+        # 添加网格信息存储
+        self.trade_grid_info = {}
+        
     def update(self, strategy, benchmark_df):
         try:
             current_date = strategy.data.datetime.date(0)
@@ -51,7 +54,7 @@ class PlotlyObserver:
             # 更新基础数据
             self.dates.append(current_date)
             self.close_prices.append(strategy.data_close[0])
-            self.sma_values.append(strategy.sma[0])
+            self.sma_values.append(float(strategy.sma[0]))  # 使用float确保保留小数
             
             # 更新组合价值和基准
             current_value = strategy.broker.getvalue()
@@ -279,6 +282,8 @@ class PlotlyObserver:
                             color='red',
                         ),
                         showlegend=False,
+                        hovertemplate='买入价格: %{text:.2f}<extra></extra>',  # 添加悬停显示，保留2位小数
+                        text=self.buy_signals['prices']  # 添加价格数据用于悬停显示
                     ),
                     row=2, col=1
                 )
@@ -297,6 +302,8 @@ class PlotlyObserver:
                             color='green',
                         ),
                         showlegend=False,
+                        hovertemplate='卖出价格: %{text:.2f}<extra></extra>',  # 添加悬停显示，保留2位小数
+                        text=self.sell_signals['prices']  # 添加价格数据用于悬停显示
                     ),
                     row=2, col=1
                 )
@@ -305,22 +312,26 @@ class PlotlyObserver:
             all_trades = []
             
             # 添加买入记录
-            for date, price in zip(self.buy_signals['dates'], self.buy_signals['prices']):
-                all_trades.append({
+            for i, (date, price) in enumerate(zip(self.buy_signals['dates'], self.buy_signals['prices'])):
+                trade_info = {
                     'date': date,
                     'price': price,
                     'type': '买入',
-                    'size': 100
-                })
+                    'size': 100,
+                    'grid_info': getattr(self, 'trade_grid_info', {}).get(f'buy_{i}', {})  # 获取网格信息
+                }
+                all_trades.append(trade_info)
                 
             # 添加卖出记录
-            for date, price in zip(self.sell_signals['dates'], self.sell_signals['prices']):
-                all_trades.append({
+            for i, (date, price) in enumerate(zip(self.sell_signals['dates'], self.sell_signals['prices'])):
+                trade_info = {
                     'date': date,
                     'price': price,
                     'type': '卖出',
-                    'size': 100
-                })
+                    'size': 100,
+                    'grid_info': getattr(self, 'trade_grid_info', {}).get(f'sell_{i}', {})  # 获取网格信息
+                }
+                all_trades.append(trade_info)
             
             # 按日期排序
             all_trades.sort(key=lambda x: x['date'])
@@ -328,7 +339,12 @@ class PlotlyObserver:
             # 打印排序后的交易记录
             print("\n交易记录:")
             for trade in all_trades:
-                print(f"日期：{trade['date']}，价格：{trade['price']:.3f}，数量：{trade['size']}，{trade['type']}")
+                grid_info_str = ""
+                if trade['grid_info']:
+                    trend_str = "上涨" if trade['grid_info']['trend'] == 'up' else "下跌"
+                    grid_info_str = f"，趋势：{trend_str}，总网格层数：{trade['grid_info']['grid_levels']}，当前持仓网格：{trade['grid_info']['active_grids']}"
+                
+                print(f"日期：{trade['date']}，价格：{trade['price']:.3f}，数量：{trade['size']}，{trade['type']}{grid_info_str}")
             
             # 在添加仓位图表之前，计算合适的刻度
             max_position = max(self.positions) if self.positions else 0
@@ -564,6 +580,7 @@ class PlotlyObserver:
                         dash='solid'
                     ),
                     showlegend=False,
+                    hovertemplate='20日均线: %{y:.3f}<extra></extra>'  # 添加悬停显示，保留3位小数
                 ),
                 row=2, col=1
             )
@@ -573,23 +590,26 @@ class PlotlyObserver:
             print(f"Error in plot: {str(e)}")
             raise 
 
-    def add_trade_signal(self, date, price, is_buy):
-        """添加交易信号
-        
-        Args:
-            date: 交易日期
-            price: 交易价格
-            is_buy: 是否为买入信号
-        """
+    def add_trade_signal(self, date, price, is_buy, grid_info=None):
+        """添加交易信号"""
         if is_buy:
             self.buy_signals['dates'].append(date)
             self.buy_signals['prices'].append(price)
+            if grid_info:
+                self.trade_grid_info[f'buy_{len(self.buy_signals["dates"])-1}'] = grid_info
         else:
             self.sell_signals['dates'].append(date)
             self.sell_signals['prices'].append(price)
+            if grid_info:
+                self.trade_grid_info[f'sell_{len(self.sell_signals["dates"])-1}'] = grid_info
 
         # 统一格式打印交易记录
-        print(f"日期：{date}，价格：{price:.3f}，数量：100，{'买入' if is_buy else '卖出'}")
+        grid_info_str = ""
+        if grid_info:
+            trend_str = "上涨" if grid_info['trend'] == 'up' else "下跌"
+            grid_info_str = f"，趋势：{trend_str}，总网格层数：{grid_info['grid_levels']}，当前持仓网格：{grid_info['active_grids']}"
+        
+        print(f"日期：{date}，价格：{price:.3f}，数量：100，{'买入' if is_buy else '卖出'}{grid_info_str}")
 
         # 计算交易盈亏
         if not is_buy and len(self.buy_signals['prices']) > 0:

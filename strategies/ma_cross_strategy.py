@@ -1,4 +1,4 @@
-from strategies.base_strategy import BaseStrategy
+from .base_strategy import BaseStrategy
 import backtrader as bt
 
 class MACrossStrategy(BaseStrategy):

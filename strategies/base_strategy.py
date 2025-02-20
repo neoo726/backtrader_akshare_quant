@@ -33,18 +33,8 @@ class BaseStrategy(bt.Strategy):
             print('订单已完成')
             if order.isbuy():
                 print(f'买入执行价格: {order.executed.price:.2f}, 数量: {order.executed.size}')
-                self.observer.add_trade_signal(
-                    self.data.datetime.date(0),
-                    order.executed.price,
-                    is_buy=True
-                )
             else:
                 print(f'卖出执行价格: {order.executed.price:.2f}, 数量: {order.executed.size}')
-                self.observer.add_trade_signal(
-                    self.data.datetime.date(0),
-                    order.executed.price,
-                    is_buy=False
-                )
             
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             print('订单取消/保证金不足/被拒绝')
