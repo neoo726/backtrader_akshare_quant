@@ -95,7 +95,8 @@ class PlotlyObserver:
                     'losing_trades': 0,
                     'profit_factor': 0,
                     'alpha': 0,
-                    'beta': 0
+                    'beta': 0,
+                    'sharpe_ratio': 0
                 }
             
             # 计算收益相关指标
@@ -134,6 +135,10 @@ class PlotlyObserver:
             alpha = np.mean(returns_array) - risk_free_rate - beta * np.mean(benchmark_array)
             alpha = alpha * 252  # 年化Alpha
             
+            # 计算夏普比率
+            returns_std = np.std(returns_array) * np.sqrt(252)  # 年化波动率
+            sharpe_ratio = (annual_return - 0.02) / returns_std if returns_std != 0 else 0  # 假设无风险利率2%
+            
             return {
                 'total_return': total_return,
                 'benchmark_return': benchmark_total_return,
@@ -145,7 +150,8 @@ class PlotlyObserver:
                 'losing_trades': losing_trades,
                 'profit_factor': profit_factor,
                 'alpha': alpha,
-                'beta': beta
+                'beta': beta,
+                'sharpe_ratio': sharpe_ratio
             }
         except Exception as e:
             print(f"Error in calculate_metrics: {str(e)}")
@@ -156,9 +162,12 @@ class PlotlyObserver:
             metrics = self.calculate_metrics()
             
             # 创建子图
-            fig = make_subplots(rows=2, cols=1, 
-                            vertical_spacing=0.12,
-                            row_heights=[0.7, 0.3])
+            fig = make_subplots(
+                rows=2, cols=1,
+                vertical_spacing=0.12,
+                row_heights=[0.7, 0.3],
+                specs=[[{"secondary_y": False}], [{"secondary_y": False}]]
+            )
             
             # 计算累积收益
             cumulative_returns = [v/self.portfolio_values[0] - 1 for v in self.portfolio_values] if self.portfolio_values else []
@@ -170,55 +179,69 @@ class PlotlyObserver:
             # 添加基准收益曲线（暗红色）
             if benchmark_cum_returns:
                 fig.add_trace(
-                    go.Scatter(x=self.dates[:len(benchmark_cum_returns)], y=benchmark_cum_returns,
-                            mode='lines', name='沪深300',
-                            line=dict(color='darkred', width=1.5),
-                            legendgroup='group1',
-                            legendgrouptitle_text="收益曲线"),
+                    go.Scatter(
+                        x=self.dates[:len(benchmark_cum_returns)],
+                        y=benchmark_cum_returns,
+                        mode='lines',
+                        name='沪深300',
+                        line=dict(color='darkred', width=1.5),
+                        showlegend=True
+                    ),
                     row=1, col=1
                 )
             
             # 添加策略收益曲线（蓝黑色）
             if cumulative_returns:
                 fig.add_trace(
-                    go.Scatter(x=self.dates, y=cumulative_returns,
-                            mode='lines', name='策略收益',
-                            line=dict(color='rgb(0, 0, 139)', width=2),
-                            legendgroup='group1'),
+                    go.Scatter(
+                        x=self.dates,
+                        y=cumulative_returns,
+                        mode='lines',
+                        name='策略收益',
+                        line=dict(color='rgb(0, 0, 139)', width=2),
+                        showlegend=True
+                    ),
                     row=1, col=1
                 )
             
             # 添加每日盈亏柱状图（红色表示盈利，绿色表示亏损）
             if self.daily_pnl:
                 fig.add_trace(
-                    go.Bar(x=self.dates, y=self.daily_pnl,
+                    go.Bar(
+                        x=self.dates,
+                        y=self.daily_pnl,
                         name='每日盈亏',
                         marker_color=['red' if x > 0 else 'green' for x in self.daily_pnl],
-                        legendgroup='group2',
-                        legendgrouptitle_text="盈亏分布"),
+                        showlegend=False
+                    ),
                     row=2, col=1
                 )
             
             # 定义指标及其位置
             metrics_info = [
-                ('策略收益', f"{metrics['total_return']:.2%}", 0.08, True),
-                ('基准收益', f"{metrics['benchmark_return']:.2%}", 0.18, True),
-                ('超额收益', f"{metrics['excess_return']:.2%}", 0.28, True),
-                ('最大回撤', f"{metrics['max_drawdown']:.2%}", 0.38, False),
-                ('胜率', f"{metrics['win_rate']:.2%}", 0.48, False),
-                ('盈利次数', f"{metrics['winning_trades']}", 0.58, False),
-                ('亏损次数', f"{metrics['losing_trades']}", 0.68, False),
-                ('盈亏比', f"{metrics['profit_factor']:.2f}", 0.78, False),
-                ('Alpha', f"{metrics['alpha']:.4f}", 0.88, True),
-                ('Beta', f"{metrics['beta']:.4f}", 0.98, True)
+                ('策略收益', f"{metrics['total_return']:.2%}", 0.02, True),
+                ('基准收益', f"{metrics['benchmark_return']:.2%}", 0.10, True),
+                ('超额收益', f"{metrics['excess_return']:.2%}", 0.18, True),
+                ('最大回撤', f"{metrics['max_drawdown']:.2%}", 0.26, False),
+                ('胜率', f"{metrics['win_rate']:.2%}", 0.34, False),
+                ('盈利次数', f"{metrics['winning_trades']}", 0.42, False),
+                ('亏损次数', f"{metrics['losing_trades']}", 0.50, False),
+                ('盈亏比', 'NA' if metrics['winning_trades'] == 0 and metrics['losing_trades'] > 0 else f"{metrics['profit_factor']:.2f}", 0.58, False),
+                ('Alpha', f"{metrics['alpha']:.2f}", 0.66, True),
+                ('Beta', f"{metrics['beta']:.2f}", 0.74, True),
+                ('夏普比率', f"{metrics['sharpe_ratio']:.2f}", 0.82, False)
             ]
             
             # 添加指标注释
             annotations = []
             for title, value, x_pos, use_color in metrics_info:
+                # 确定颜色逻辑
                 if use_color:
-                    is_negative = '-' in str(value)
-                    color = 'green' if is_negative else 'red'
+                    if float(value.strip('%').strip('-')) == 0:  # 对于百分比和非百分比都适用
+                        color = 'black'
+                    else:
+                        is_negative = '-' in str(value)
+                        color = 'green' if is_negative else 'red'
                 else:
                     color = 'black'
                 
@@ -253,13 +276,20 @@ class PlotlyObserver:
                 yaxis_tickformat='.2%',
                 yaxis2_tickformat='.0f',
                 legend=dict(
-                    groupclick="toggleitem",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
+                    y=0.98,
+                    x=0.98,
+                    xanchor='right',
+                    yanchor='top',
+                    bgcolor='rgba(255, 255, 255, 0.8)',
+                    bordercolor='rgba(0, 0, 0, 0.3)',
+                    borderwidth=1,
+                    tracegroupgap=5
                 )
             )
+            
+            # 更新y轴标题
+            fig.update_yaxes(title_text="累积收益率", row=1, col=1)
+            fig.update_yaxes(title_text="每日盈亏", row=2, col=1)
             
             fig.show()
         except Exception as e:
