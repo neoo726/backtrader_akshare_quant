@@ -1,113 +1,203 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+CyberTrader - 自动化交易系统
+
+主入口文件，用于启动不同的功能模块：
+1. 回测模式：运行历史数据回测
+2. 实盘交易模式：连接券商API进行实盘交易
+3. 股票代码检查：检查股票代码的有效性和基本信息
+
+使用方法:
+    python main.py --mode backtest --strategy etf_rotation --start_date 2020-01-01 --end_date 2023-12-31
+    python main.py --mode trade --strategy etf_rotation
+    python main.py --mode check --code 000001
+"""
+
+import os
+import sys
+import argparse
 from datetime import datetime, timedelta
-import backtrader as bt
-import akshare as ak
-import pandas as pd
-from plotly_observer import PlotlyObserver
-# import matplotlib.pyplot as plt  # 由于 Backtrader 的问题，此处要求 pip install matplotlib==3.2.2
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-# 从strategies包导入策略
-from strategies import MACrossStrategy, GridStrategy
-from config import BACKTEST_CONFIG, DATA_CONFIG
+from loguru import logger
 
-#plt.rcParams["font.sans-serif"] = ["SimHei"]
-#plt.rcParams["axes.unicode_minus"] = False
-# 设置日期范围，为了计算指标，获取额外30天的历史数据
-start_date = datetime(2024, 6, 16)  # 回测开始时间
-end_date = datetime(2025, 2, 16)  # 回测结束时间
+# 添加项目根目录到路径
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# 计算数据获取的实际开始日期（回测开始日期前30天）
-data_start_date = BACKTEST_CONFIG['start_date'] - timedelta(days=30)
-
-# 利用 AKShare 获取股票的后复权数据，这里只获取前 7 列
-stock_hfq_df = ak.fund_etf_hist_em(
-    symbol=DATA_CONFIG['stock_code'], 
-    adjust="hfq"
-).iloc[:, :6]
-
-# 删除 `股票代码` 列
-# del stock_hfq_df['股票代码']
-# 处理字段命名，以符合 Backtrader 的要求
-stock_hfq_df.columns = [
-    'date',
-    'open',
-    'close',
-    'high',
-    'low',
-    'volume',
-]
-# 把 date 作为日期索引，以符合 Backtrader 的要求
-stock_hfq_df.index = pd.to_datetime(stock_hfq_df['date'])
-# 获取沪深300数据
-benchmark_df = ak.fund_etf_hist_em(symbol="510300",  adjust="hfq").iloc[:, :6]
-#del benchmark_df['股票代码']
-benchmark_df.columns = [
-    'date',
-    'open',
-    'close',
-    'high',
-    'low',
-    'volume',
-]
-# 把 date 作为日期索引，以符合 Backtrader 的要求
-benchmark_df.index = pd.to_datetime(benchmark_df['date'])
-
-# 截取日期范围时使用不同的日期
-stock_hfq_df = stock_hfq_df.loc[data_start_date:BACKTEST_CONFIG['end_date']]
-benchmark_df = benchmark_df.loc[data_start_date:BACKTEST_CONFIG['end_date']]
-print('stock_hfq_df',stock_hfq_df)
-print('benchmark_df',benchmark_df)
-
-# 在数据准备部分添加
-print("\n数据检查:")
-print(f"数据起始日期: {stock_hfq_df.index[0]}")
-print(f"数据结束日期: {stock_hfq_df.index[-1]}")
-print(f"数据天数: {len(stock_hfq_df)}")
-print("\n前20天数据:")
-print(stock_hfq_df.head(20))
-
-# Create and update the Plotly observer
-observer = PlotlyObserver()
-
-# 准备数据时使用回测的实际开始日期
-data = bt.feeds.PandasData(
-    dataname=stock_hfq_df,
-    datetime=None,
-    fromdate=BACKTEST_CONFIG['start_date'],  # 实际回测开始日期
-    todate=BACKTEST_CONFIG['end_date']
+# 导入工具和策略
+from utils.logger import setup_logger
+from utils.data_fetcher import DataFetcher
+from strategies.ma_strategy import MAStrategy
+from strategies.sma_strategy import SMAStrategy
+from strategies.etf_rotation_strategy import ETFRotationStrategy, ETF_POOL
+from backtest.backtest_engine import run_backtest, BacktestEngine
+from realtime.qmt_trader import run_realtime
+from utils.plotting import plot_returns, setup_chinese_fonts
+from config.config import (
+    BACKTEST_START_DATE, 
+    BACKTEST_END_DATE, 
+    BACKTEST_INITIAL_CAPITAL,
+    DEFAULT_BENCHMARK_CODE
 )
 
-# 初始化回测系统
-cerebro = bt.Cerebro()
+# 设置日志
+logger.remove()
+logger.add(sys.stderr, level="INFO")
+logger.add("logs/cyber_trader_{time}.log", rotation="500 MB", level="DEBUG")
 
-# 添加数据
-cerebro.adddata(data)
+def main():
+    """
+    主函数，解析命令行参数并启动相应功能
+    """
+    # 创建命令行参数解析器
+    parser = argparse.ArgumentParser(description="CyberTrader - 自动化交易系统")
+    
+    # 添加功能选择参数组
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument("--backtest", action="store_true", help="运行回测模式")
+    mode_group.add_argument("--trade", action="store_true", help="运行实盘交易模式")
+    mode_group.add_argument("--check", action="store_true", help="检查股票代码")
+    
+    # 添加回测模式参数
+    backtest_group = parser.add_argument_group("回测参数")
+    backtest_group.add_argument("--strategy", type=str, default="etf_rotation", help="策略名称: etf_rotation, sma, etc.")
+    backtest_group.add_argument("--start_date", type=str, default=BACKTEST_START_DATE, help="回测开始日期 (YYYY-MM-DD)")
+    backtest_group.add_argument("--end_date", type=str, default=BACKTEST_END_DATE, help="回测结束日期 (YYYY-MM-DD)")
+    backtest_group.add_argument("--initial_cash", type=float, default=BACKTEST_INITIAL_CAPITAL, help="初始资金")
+    backtest_group.add_argument("--benchmark", type=str, default=DEFAULT_BENCHMARK_CODE, help="基准指数代码")
+    
+    # 添加ETF轮动策略参数
+    etf_group = parser.add_argument_group("ETF轮动策略参数")
+    etf_group.add_argument("--short_period", type=int, default=20, help="短期动量周期")
+    etf_group.add_argument("--long_period", type=int, default=60, help="长期动量周期")
+    etf_group.add_argument("--max_volatility", type=float, default=0.3, help="最大波动率")
+    etf_group.add_argument("--top_n", type=int, default=3, help="持有ETF数量")
+    etf_group.add_argument("--rebalance_days", type=int, default=5, help="再平衡周期(天)")
+    
+    # 添加实盘交易参数
+    trade_group = parser.add_argument_group("实盘交易参数")
+    trade_group.add_argument("--broker", type=str, default="simulator", help="券商API: simulator, eastmoney, etc.")
+    trade_group.add_argument("--account", type=str, help="交易账户")
+    trade_group.add_argument("--password", type=str, help="交易密码")
+    
+    # 添加股票代码检查参数
+    check_group = parser.add_argument_group("股票代码检查参数")
+    check_group.add_argument("--code", type=str, help="股票代码")
+    
+    # 解析命令行参数
+    args = parser.parse_args()
+    
+    # 根据模式启动相应功能
+    if args.backtest:
+        run_backtest_function(args)
+    elif args.trade:
+        run_trade_function(args)
+    elif args.check:
+        run_code_checker(args)
 
-# 设置初始资金和手续费
-cerebro.broker.setcash(BACKTEST_CONFIG['initial_cash'])
-cerebro.broker.setcommission(commission=BACKTEST_CONFIG['commission_rate'])
+def run_backtest_function(args):
+    """
+    运行回测功能
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        命令行参数
+    """
+    logger.info("启动回测模式")
+    
+    # 设置中文字体
+    font_prop = setup_chinese_fonts()
+    
+    # 根据策略名称选择对应的策略
+    if args.strategy.lower() == "etf_rotation":
+        logger.info("使用ETF轮动策略进行回测")
+        
+        # 设置策略参数
+        strategy_params = {
+            'short_period': args.short_period,
+            'long_period': args.long_period,
+            'max_volatility': args.max_volatility,
+            'top_n': args.top_n,
+            'rebalance_days': args.rebalance_days
+        }
+        
+        # 运行回测
+        results = run_backtest(
+            strategy=ETFRotationStrategy,
+            universe=ETF_POOL,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            initial_capital=args.initial_cash,
+            is_etf=True,
+            benchmark_code=args.benchmark,
+            strategy_params=strategy_params
+        )
+        
+        # 绘制回测结果
+        if results:
+            plot_returns(
+                strategy_returns=results['cumulative_returns'],
+                benchmark_returns=results['benchmark_returns'],
+                statistics=results['statistics'],
+                font_properties=font_prop
+            )
+        else:
+            logger.error("回测失败，无法绘制结果")
+    
+    elif args.strategy.lower() == "sma":
+        logger.info("使用SMA策略进行回测")
+        # 这里可以添加其他策略的回测代码
+        logger.warning("SMA策略尚未实现")
+    
+    else:
+        logger.error(f"未知策略: {args.strategy}")
 
-# 添加策略，同时传入观察者和基准数据
-cerebro.addstrategy(
-    GridStrategy,  # 使用网格策略
-    observer=observer,
-    benchmark_df=benchmark_df
-)
+def run_trade_function(args):
+    """
+    运行实盘交易功能
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        命令行参数
+    """
+    logger.info("启动实盘交易模式")
+    logger.warning("实盘交易功能尚未实现")
+    # 这里可以添加实盘交易的代码
 
-# 运行回测
-cerebro.run()
+def run_code_checker(args):
+    """
+    运行股票代码检查功能
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        命令行参数
+    """
+    logger.info(f"检查股票代码: {args.code}")
+    
+    # 创建数据获取器
+    data_fetcher = DataFetcher()
+    
+    # 获取股票基本信息
+    stock_info = data_fetcher.get_stock_info(args.code)
+    
+    if stock_info is not None:
+        logger.info(f"股票名称: {stock_info.get('name', '未知')}")
+        logger.info(f"所属行业: {stock_info.get('industry', '未知')}")
+        logger.info(f"上市日期: {stock_info.get('list_date', '未知')}")
+        logger.info(f"总股本: {stock_info.get('total_share', '未知')}")
+        logger.info(f"流通股本: {stock_info.get('float_share', '未知')}")
+    else:
+        logger.error(f"无法获取股票 {args.code} 的信息，请检查代码是否正确")
 
-# 输出结果
-port_value = cerebro.broker.getvalue()
-pnl = port_value - BACKTEST_CONFIG['initial_cash']
-
-# 绘制结果
-observer.plot()
-
-print(f"初始资金: {BACKTEST_CONFIG['initial_cash']:,.2f}")
-print(f"回测期间：{BACKTEST_CONFIG['start_date'].strftime('%Y%m%d')}:{BACKTEST_CONFIG['end_date'].strftime('%Y%m%d')}")
-print(f"总资金: {port_value:,.2f}")
-print(f"净收益: {pnl:,.2f}")
-
-#cerebro.plot(style='candlestick')  # 画图
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("用户中断程序")
+        sys.exit(0)
+    except Exception as e:
+        logger.exception(f"程序异常: {e}")
+        sys.exit(1) 

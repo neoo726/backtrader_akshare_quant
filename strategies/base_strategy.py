@@ -1,47 +1,271 @@
-import backtrader as bt
+"""
+Base strategy class for the trading system
+"""
+from abc import ABC, abstractmethod
+import pandas as pd
+import numpy as np
+from loguru import logger
 
-class BaseStrategy(bt.Strategy):
-    """基础策略类，处理通用配置和功能"""
+class BaseStrategy(ABC):
+    """
+    Base strategy class to be inherited by all trading strategies
     
-    params = (
-        ("observer", None),      # 观察者
-        ("benchmark_df", None),  # 基准数据
-    )
-
-    def __init__(self):
-        """初始化基础功能"""
-        self.order = None  # 当前待执行订单
-        self.observer = self.params.observer
-        self.benchmark_df = self.params.benchmark_df
-
-    def notify_order(self, order):
-        """通用订单状态处理"""
-        # 打印订单的详细状态
-        print(f"\n订单状态详情:")
-        print(f"订单状态代码: {order.status}")
-        print(f"订单状态名称: {order.Status[order.status]}")
-        print(f"订单类型: {'买入' if order.isbuy() else '卖出'}")
-        print(f"订单数量: {order.size}")
-        print(f"订单价格: {order.price}")
+    This class implements common functionality and defines the interface
+    for strategies to be used in both backtesting and real-time trading.
+    """
+    
+    def __init__(self, name="BaseStrategy"):
+        """
+        Initialize the strategy
         
-        # 根据不同状态处理订单
-        if order.status in [order.Submitted, order.Accepted]:
-            print('订单已提交/已接受')
-            return
-
-        if order.status == order.Completed:
-            print('订单已完成')
-            if order.isbuy():
-                print(f'买入执行价格: {order.executed.price:.2f}, 数量: {order.executed.size}')
-            else:
-                print(f'卖出执行价格: {order.executed.price:.2f}, 数量: {order.executed.size}')
+        Parameters:
+        -----------
+        name : str
+            Name of the strategy
+        """
+        self.name = name
+        self.logger = logger.bind(strategy=name)
+        self.logger.info(f"Initializing strategy: {name}")
+        
+        # Current positions and portfolio state
+        self.positions = {}  # stock_code -> quantity
+        self.portfolio_value = 0.0
+        self.cash = 0.0
+        self.initial_capital = 0.0
+        
+        # Internal state variables
+        self.current_date = None
+        self.current_data = {}  # stock_code -> price data
+        self.universe = []  # List of stock codes
+        
+    def set_universe(self, universe):
+        """
+        Set the universe of stocks for this strategy
+        
+        Parameters:
+        -----------
+        universe : list
+            List of stock codes
+        """
+        self.universe = universe
+        self.logger.info(f"Set universe with {len(universe)} stocks")
+        
+    def set_initial_capital(self, capital):
+        """
+        Set the initial capital for the strategy
+        
+        Parameters:
+        -----------
+        capital : float
+            Initial capital
+        """
+        self.initial_capital = capital
+        self.cash = capital
+        self.logger.info(f"Set initial capital to {capital}")
+        
+    def update_portfolio_value(self):
+        """
+        Update the portfolio value based on current positions and prices
+        """
+        portfolio_value = self.cash
+        
+        for stock_code, quantity in self.positions.items():
+            if stock_code in self.current_data:
+                price = self.current_data[stock_code].get('close', 0)
+                portfolio_value += price * quantity
+        
+        self.portfolio_value = portfolio_value
+        return portfolio_value
+        
+    def handle_data(self, current_date, current_data):
+        """
+        Handle new data and execute strategy logic
+        
+        Parameters:
+        -----------
+        current_date : datetime.datetime
+            Current date
+        current_data : dict
+            Dictionary mapping stock codes to price data
             
-        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            print('订单取消/保证金不足/被拒绝')
+        Returns:
+        --------
+        list
+            List of order decisions
+        """
+        self.current_date = current_date
+        self.current_data = current_data
         
-        # 重置订单
-        self.order = None
-
-    def next(self):
-        """每个交易日更新观察者数据"""
-        self.observer.update(self, self.benchmark_df) 
+        # Update portfolio value
+        self.update_portfolio_value()
+        
+        # Call the strategy-specific implementation
+        return self._strategy_logic()
+    
+    @abstractmethod
+    def _strategy_logic(self):
+        """
+        Implement the strategy logic
+        
+        This method should be implemented by each specific strategy.
+        
+        Returns:
+        --------
+        list
+            List of order decisions, where each order is a dict with keys:
+            - 'stock_code': str
+            - 'action': 'BUY' or 'SELL'
+            - 'quantity': int
+            - 'price': float (optional, market order if not provided)
+            - 'order_type': str (optional, default is 'MARKET')
+        """
+        pass
+    
+    def get_position(self, stock_code):
+        """
+        Get current position for a stock
+        
+        Parameters:
+        -----------
+        stock_code : str
+            Stock code
+            
+        Returns:
+        --------
+        int
+            Current position quantity (0 if not held)
+        """
+        return self.positions.get(stock_code, 0)
+    
+    def get_price(self, stock_code, field='close'):
+        """
+        Get current price for a stock
+        
+        Parameters:
+        -----------
+        stock_code : str
+            Stock code
+        field : str
+            Price field: 'open', 'high', 'low', 'close'
+            
+        Returns:
+        --------
+        float
+            Current price (0 if not available)
+        """
+        if stock_code in self.current_data:
+            return self.current_data[stock_code].get(field, 0)
+        return 0
+    
+    def calculate_ma(self, stock_code, period, field='close'):
+        """
+        Calculate moving average for a stock
+        
+        Parameters:
+        -----------
+        stock_code : str
+            Stock code
+        period : int
+            Moving average period
+        field : str
+            Price field to use
+            
+        Returns:
+        --------
+        float
+            Moving average value (or None if not enough data)
+        """
+        if stock_code not in self.current_data:
+            return None
+        
+        price_history = self.current_data[stock_code].get('history', None)
+        
+        if price_history is None or len(price_history) < period:
+            return None
+        
+        ma = price_history[field].rolling(window=period).mean().iloc[-1]
+        return ma
+    
+    def order(self, stock_code, quantity, price=None, order_type="MARKET"):
+        """
+        Place an order (for backtesting)
+        
+        Parameters:
+        -----------
+        stock_code : str
+            Stock code
+        quantity : int
+            Quantity to buy (positive) or sell (negative)
+        price : float
+            Limit price (optional)
+        order_type : str
+            Order type: 'MARKET' or 'LIMIT'
+            
+        Returns:
+        --------
+        dict
+            Order details
+        """
+        action = "BUY" if quantity > 0 else "SELL"
+        abs_quantity = abs(quantity)
+        
+        order_details = {
+            'stock_code': stock_code,
+            'action': action,
+            'quantity': abs_quantity,
+            'price': price,
+            'order_type': order_type
+        }
+        
+        self.logger.info(f"Generated order: {action} {abs_quantity} shares of {stock_code}")
+        return order_details
+    
+    def update_position(self, stock_code, quantity_change, price):
+        """
+        Update position after an order is executed
+        
+        Parameters:
+        -----------
+        stock_code : str
+            Stock code
+        quantity_change : int
+            Change in quantity (positive for buy, negative for sell)
+        price : float
+            Execution price
+        """
+        current_position = self.positions.get(stock_code, 0)
+        new_position = current_position + quantity_change
+        
+        # Update cash
+        self.cash -= quantity_change * price
+        
+        # Update position
+        if new_position == 0:
+            # If position is closed, remove it from positions
+            if stock_code in self.positions:
+                del self.positions[stock_code]
+        else:
+            self.positions[stock_code] = new_position
+            
+        self.logger.info(f"Updated position for {stock_code}: {current_position} -> {new_position}")
+        self.logger.info(f"Cash balance: {self.cash}")
+        
+        # Update portfolio value
+        self.update_portfolio_value()
+    
+    def get_info(self):
+        """
+        Get strategy information and current state
+        
+        Returns:
+        --------
+        dict
+            Strategy information
+        """
+        return {
+            'name': self.name,
+            'portfolio_value': self.portfolio_value,
+            'cash': self.cash,
+            'positions': self.positions,
+            'current_date': self.current_date
+        } 
