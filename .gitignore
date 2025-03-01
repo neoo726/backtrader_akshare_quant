@@ -3,7 +3,7 @@ myenv/
 venv/
 env/
 ENV/
-
+backtest_output/
 # 日志文件
 logs/
 *.log
