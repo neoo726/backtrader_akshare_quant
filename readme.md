@@ -72,7 +72,7 @@ python run_strategy.py --strategy sma --symbol 600519 --ma-period 20 --start-dat
 ### 运行ETF轮动策略回测
 
 ```bash
-python run_strategy.py --strategy etf_rotation --start-date 2018-01-01 --end-date 2024-06-30 --lookback-period 20 --rebalance-freq 5
+python main.py --backtest --strategy etf_rotation
 ```
 
 参数说明：
@@ -143,4 +143,3 @@ ETF轮动策略是一种动态资产配置策略，通过定期评估ETF的表�
 
 本项目采用 MIT 许可证 - 详情请参阅 [LICENSE](LICENSE) 文件
 
-python main.py --backtest --strategy etf_rotation
