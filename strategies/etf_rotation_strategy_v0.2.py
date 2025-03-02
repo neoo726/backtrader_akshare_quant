@@ -1,9 +1,17 @@
 """
-ETF轮动策略
-
+ETF轮动策略V0.2
 该策略基于动量和波动率在ETF之间进行轮动。
 它选择具有最高动量（一段时间内的价格变化）
 和最低波动率的ETF。
+20250302：
+更新轮动池，增加科技与高端制造、周期与资源、消费与医药、战略新兴ETF
+
+更新2.0：
+1. 取消波动率的绝对值限制
+2. 短期和长期收益率均为负值的ETF不纳入计算
+3. 动量计算改为价格和成交量的加权计算
+4. 计算最终排名按照动量/波动率的结果
+5. 选择前3-5名持仓，持仓比例按照得分比例分配
 """
 
 import backtrader as bt
@@ -13,46 +21,45 @@ from loguru import logger
 
 # ETF轮动池
 ETF_POOL = [
-    '159915',  # 易方达创业板ETF
+    # 宽基指数
     '510300',  # 华泰柏瑞沪深300ETF
     '510500',  # 南方中证500ETF
-    '512880',  # 国泰中证军工ETF
-    '512660',  # 国泰中证军工ETF
-    '512010',  # 国泰中证军工ETF
-    '512800',  # 华宝中证银行ETF
-    '512200',  # 南方中证全指证券公司ETF
-    '512690',  # 鹏华中证酒ETF
-    '512980',  # 广发中证传媒ETF
+    '159915',  # 易方达创业板ETF
+    # 科技与高端制造
     '512760',  # 国泰CES半导体芯片ETF
-    '512480',  # 国联安中证医药ETF
-    '512330',  # 南方中证500信息技术ETF
-    '512170',  # 华安中证细分医药ETF
-    '515000',  # 华夏中证央企ETF
-    '515030',  # 华夏中证新能源汽车ETF
-    '515880',  # 国泰中证全指证券公司ETF
     '515050',  # 华夏中证5G通信主题ETF
-    '515220',  # 华泰柏瑞中证光伏产业ETF
-    '515790',  # 华泰柏瑞中证智能汽车ETF
-    '516160',  # 南方中证申万有色金属ETF
-    '516950',  # 华夏中证四川国企改革ETF
-    '588080',  # 易方达中证科创创业50ETF
-    '588090',  # 国泰中证新能源汽车ETF
-    '588000',  # 华夏中证科创板50ETF
+    '515790',  # 华泰柏瑞中证光伏产业ETF
+    '588000',  # 华夏中证科创创业50ETF
+    '515030',  # 华夏中证新能源汽车ETF（新增）
+    # 周期与资源
+    '512880',  # 国泰中证全指证券公司ETF
+    '512400',  # 南方中证申万有色金属ETF
+    '561700',  # 国泰中证全指电力ETF
+    # 消费与医药
+    '512690',  # 鹏华中证酒ETF
+    '512480',  # 国联安中证医药ETF
+    '517090',  # 华泰柏瑞中证港股通医疗ETF
+    # 战略新兴
+    '516510',  # 易方达中证人工智能ETF
 ]
+
 
 class ETFRotationStrategy(bt.Strategy):
     """
-    ETF轮动策略
+    ETF轮动策略 2.0
     
     该策略基于动量和波动率在ETF之间进行轮动。
-    它选择具有最高动量（一段时间内的价格变化）
-    和最低波动率的ETF。
+    1. 取消波动率的绝对值限制
+    2. 短期和长期收益率均为负值的ETF不纳入计算
+    3. 动量计算改为价格和成交量的加权计算
+    4. 计算最终排名按照动量/波动率的结果
+    5. 选择前3-5名持仓，持仓比例按照得分比例分配
     """
     
     params = (
         ('short_period', 20),      # 短期动量周期
         ('long_period', 60),       # 长期动量周期
-        ('max_volatility', 0.3),   # 最大允许波动率
+        ('volume_weight', 0.3),    # 成交量在动量计算中的权重
         ('top_n', 3),              # 持有ETF数量
         ('rebalance_days', 5),     # 每N天再平衡一次
         ('benchmark', False),      # 最后一个数据源是否为基准
@@ -68,23 +75,34 @@ class ETFRotationStrategy(bt.Strategy):
         self.day_count = 0  # 再平衡计数器
         
         # 为每个数据源计算动量和波动率
-        self.momentum = {}
+        self.short_momentum = {}
+        self.long_momentum = {}
         self.volatility = {}
+        self.volume = {}
         
         for i, d in enumerate(self.datas):
             # 如果最后一个数据源是基准，则跳过
             if i == len(self.datas) - 1 and self.p.benchmark:
                 continue
                 
-            # 使用短期和长期移动平均线计算动量
-            self.momentum[d._name] = bt.indicators.ROC(
+            # 计算短期和长期动量
+            self.short_momentum[d._name] = bt.indicators.ROC(
                 d, period=self.p.short_period, plot=False
+            )
+            
+            self.long_momentum[d._name] = bt.indicators.ROC(
+                d, period=self.p.long_period, plot=False
             )
             
             # 使用标准差计算波动率
             self.volatility[d._name] = bt.indicators.StdDev(
                 d.close, period=self.p.long_period, plot=False
             ) / d.close
+            
+            # 计算成交量变化
+            self.volume[d._name] = bt.indicators.ROC(
+                d.volume, period=self.p.short_period, plot=False
+            )
     
     def next(self):
         """
@@ -107,45 +125,64 @@ class ETFRotationStrategy(bt.Strategy):
             if i == len(self.datas) - 1 and hasattr(self.p, 'benchmark') and self.p.benchmark:
                 continue
                 
-            # 获取动量和波动率值
-            momentum_value = self.momentum[d._name][0]
+            # 获取短期和长期动量值
+            short_momentum_value = self.short_momentum[d._name][0]
+            long_momentum_value = self.long_momentum[d._name][0]
             volatility_value = self.volatility[d._name][0]
+            volume_change = self.volume[d._name][0]
             
-            # 如果数据不足或波动率过高则跳过
-            if np.isnan(momentum_value) or np.isnan(volatility_value):
+            # 如果数据不足则跳过
+            if (np.isnan(short_momentum_value) or np.isnan(long_momentum_value) or 
+                np.isnan(volatility_value) or np.isnan(volume_change)):
                 continue
                 
-            if volatility_value > self.p.max_volatility:
+            # 如果短期和长期动量均为负，则排除该ETF
+            if short_momentum_value < 0 and long_momentum_value < 0:
+                logger.info(f"{d._name} 短期和长期动量均为负，排除")
                 continue
                 
-            # 计算得分（更高的动量，更低的波动率更好）
-            scores[d._name] = momentum_value / (volatility_value + 0.0001)  # 避免除以零
+            # 计算价格和成交量加权的动量值
+            price_weight = 1 - self.p.volume_weight
+            weighted_momentum = (price_weight * short_momentum_value + 
+                                self.p.volume_weight * volume_change)
+            
+            # 计算风险调整后的动量得分（更高的动量，更低的波动率更好）
+            # 避免除以零
+            if volatility_value <= 0:
+                volatility_value = 0.0001
+                
+            scores[d._name] = weighted_momentum / volatility_value
         
         # 按得分排序ETF并选择前N个
         sorted_etfs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        top_etfs = [etf for etf, score in sorted_etfs[:self.p.top_n]]
+        top_etfs = sorted_etfs[:self.p.top_n]
         
         # 记录选中的ETF
         if top_etfs:
-            logger.info(f"选中的ETF: {', '.join(top_etfs)}")
+            logger.info(f"选中的ETF: {', '.join([etf for etf, _ in top_etfs])}")
+            logger.info(f"得分: {', '.join([f'{etf}: {score:.4f}' for etf, score in top_etfs])}")
         else:
             logger.warning("根据条件未选中任何ETF")
             return
             
         # 关闭不在前列表中的ETF持仓
         for etf in list(self.current_holdings.keys()):
-            if etf not in top_etfs:
+            if etf not in [e for e, _ in top_etfs]:
                 self.close(data=self.getdatabyname(etf))
                 logger.info(f"关闭{etf}的持仓")
                 if etf in self.current_holdings:
                     del self.current_holdings[etf]
         
-        # 计算每个选中ETF的持仓规模
-        position_size = portfolio_value / len(top_etfs) if top_etfs else 0
+        # 计算总得分
+        total_score = sum([score for _, score in top_etfs])
         
         # 为顶级ETF开设或调整持仓
-        for etf in top_etfs:
+        for etf, score in top_etfs:
             data = self.getdatabyname(etf)
+            
+            # 计算基于得分比例的持仓规模
+            score_ratio = score / total_score if total_score > 0 else 0
+            position_size = portfolio_value * score_ratio
             
             # 计算要买入的股票数量
             price = data.close[0]
@@ -159,13 +196,13 @@ class ETFRotationStrategy(bt.Strategy):
                 # 买入更多股票
                 shares_to_buy = target_shares - current_position
                 self.buy(data=data, size=shares_to_buy)
-                logger.info(f"买入{shares_to_buy}股{etf}")
+                logger.info(f"买入{shares_to_buy}股{etf}，目标持仓比例: {score_ratio:.2%}")
                 self.current_holdings[etf] = target_shares
             elif target_shares < current_position:
                 # 卖出一些股票
                 shares_to_sell = current_position - target_shares
                 self.sell(data=data, size=shares_to_sell)
-                logger.info(f"卖出{shares_to_sell}股{etf}")
+                logger.info(f"卖出{shares_to_sell}股{etf}，目标持仓比例: {score_ratio:.2%}")
                 if target_shares > 0:
                     self.current_holdings[etf] = target_shares
                 else:

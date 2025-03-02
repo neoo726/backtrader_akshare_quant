@@ -22,8 +22,8 @@ for directory in [DATA_DIR, CACHE_DIR, LOG_DIR, ORDER_LOG_DIR, POSITION_LOG_DIR,
     os.makedirs(directory, exist_ok=True)
 
 # Backtest settings
-BACKTEST_START_DATE = "2022-01-01"
-BACKTEST_END_DATE = "2025-12-31"
+DEFAULT_BACKTEST_START = '20230101'  # 默认回测开始日期
+DEFAULT_BACKTEST_END = '20250228'    # 默认回测结束日期
 BACKTEST_INITIAL_CAPITAL = 20000  # 2万初始资金
 DEFAULT_BENCHMARK_CODE = "000300"  # 默认基准指数：沪深300
 
