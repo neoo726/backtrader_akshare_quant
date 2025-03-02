@@ -1,17 +1,17 @@
 """
-ETF轮动策略V2.0
+ETF轮动策略V3.0
 该策略基于动量和波动率在ETF之间进行轮动。
 它选择具有最高动量（一段时间内的价格变化）
 和最低波动率的ETF。
 20250302：
 更新轮动池，增加科技与高端制造、周期与资源、消费与医药、战略新兴ETF
 
-更新2.0：
-1. 取消波动率的绝对值限制
-2. 短期和长期收益率均为负值的ETF不纳入计算
-3. 动量计算改为价格和成交量的加权计算
-4. 计算最终排名按照动量/波动率的结果
-5. 选择前3-5名持仓，持仓比例按照得分比例分配
+更新3.0：
+1. 最多同时持仓5个ETF，如果没有满足条件的则空仓
+2. 每个ETF最多持仓比例不能超过20%，得分最高的持仓20%
+3. 其他ETF持仓比例 = (得分/最高分) * 20%
+4. 执行顺序：先卖出，再买入
+5. 短期和长期收益率均为负值的ETF不纳入计算
 """
 
 import backtrader as bt
@@ -47,23 +47,24 @@ ETF_POOL = [
 
 class ETFRotationStrategy2(bt.Strategy):
     """
-    ETF轮动策略 2.0
+    ETF轮动策略 3.0
     
     该策略基于动量和波动率在ETF之间进行轮动。
-    1. 取消波动率的绝对值限制
-    2. 短期和长期收益率均为负值的ETF不纳入计算
-    3. 动量计算改为价格和成交量的加权计算
-    4. 计算最终排名按照动量/波动率的结果
-    5. 选择前3-5名持仓，持仓比例按照得分比例分配
+    1. 最多同时持仓5个ETF，如果没有满足条件的则空仓
+    2. 每个ETF最多持仓比例不能超过20%，得分最高的持仓20%
+    3. 其他ETF持仓比例 = (得分/最高分) * 20%
+    4. 执行顺序：先卖出，再买入
+    5. 短期和长期收益率均为负值的ETF不纳入计算
     """
     
     params = (
         ('short_period', 10),      # 短期动量周期
         ('long_period', 30),       # 长期动量周期
         ('volume_weight', 0.3),    # 成交量在动量计算中的权重
-        ('top_n', 3),              # 持有ETF数量
+        ('max_etfs', 5),           # 最大持有ETF数量
         ('rebalance_days', 5),     # 每N天再平衡一次
         ('benchmark', False),      # 最后一个数据源是否为基准
+        ('position_limit', 0.20),  # 单ETF持仓上限
         ('start_date', pd.to_datetime(DEFAULT_BACKTEST_START).date()),  # 默认开始日期
         ('end_date', pd.to_datetime(DEFAULT_BACKTEST_END).date()),      # 默认结束日期
     )
@@ -156,63 +157,115 @@ class ETFRotationStrategy2(bt.Strategy):
             if volatility_value <= 0:
                 volatility_value = 0.0001
                 
-            scores[d._name] = weighted_momentum / volatility_value
+            score = weighted_momentum / volatility_value
+            
+            # 只有得分为正的ETF才纳入考虑
+            if score > 0:
+                scores[d._name] = score
         
         # 按得分排序ETF并选择前N个
         sorted_etfs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        top_etfs = sorted_etfs[:self.p.top_n]
+        top_etfs = sorted_etfs[:self.p.max_etfs]  # 最多选择5个
         
         # 记录选中的ETF
         if top_etfs:
             logger.info(f"选中的ETF: {', '.join([etf for etf, _ in top_etfs])}")
             logger.info(f"得分: {', '.join([f'{etf}: {score:.4f}' for etf, score in top_etfs])}")
         else:
-            logger.warning("根据条件未选中任何ETF")
-            return
+            logger.warning("根据条件未选中任何ETF，将保持空仓")
             
-        # 关闭不在前列表中的ETF持仓
+        # 第一阶段：执行所有卖出操作
+        
+        # 如果没有符合条件的ETF或持仓ETF不在选中列表中，则清空持仓
         for etf in list(self.current_holdings.keys()):
-            if etf not in [e for e, _ in top_etfs]:
-                self.close(data=self.getdatabyname(etf))
-                logger.info(f"关闭{etf}的持仓")
-                if etf in self.current_holdings:
-                    del self.current_holdings[etf]
+            if not top_etfs or etf not in [e for e, _ in top_etfs]:
+                data = self.getdatabyname(etf)
+                if data:
+                    position = self.getposition(data).size
+                    if position > 0:
+                        self.close(data=data)
+                        logger.info(f"关闭{etf}的持仓")
+                del self.current_holdings[etf]
         
-        # 计算总得分
-        total_score = sum([score for _, score in top_etfs])
+        # 如果没有选中的ETF，直接返回（保持空仓）
+        if not top_etfs:
+            return
         
-        # 为顶级ETF开设或调整持仓
+        # 获取最高得分作为基准
+        highest_score = top_etfs[0][1]
+        
+        # 计算持仓比例字典
+        target_weights = {}
         for etf, score in top_etfs:
+            # 得分最高的ETF占20%
+            if score == highest_score:
+                target_weights[etf] = self.p.position_limit
+            else:
+                # 其他ETF按照 (得分/最高分) * 20% 计算
+                weight = (score / highest_score) * self.p.position_limit
+                target_weights[etf] = weight
+                
+        # 记录目标持仓比例
+        logger.info(f"目标持仓比例: {', '.join([f'{etf}: {weight:.2%}' for etf, weight in target_weights.items()])}")
+        
+        # 2. 减少需要减仓的ETF持仓
+        for etf, target_weight in target_weights.items():
             data = self.getdatabyname(etf)
             
-            # 计算基于得分比例的持仓规模
-            score_ratio = score / total_score if total_score > 0 else 0
-            position_size = portfolio_value * score_ratio
+            # 计算目标持仓规模
+            position_size = portfolio_value * target_weight
             
-            # 计算要买入的股票数量
+            # 计算目标股数
             price = data.close[0]
+            if price <= 0:
+                logger.error(f"无效价格: {etf} 价格={price}")
+                continue
+                
             target_shares = int(position_size / price)
             
             # 获取当前持仓
             current_position = self.getposition(data).size
             
-            # 根据需要调整持仓
-            if target_shares > current_position:
-                # 买入更多股票
-                shares_to_buy = target_shares - current_position
-                self.buy(data=data, size=shares_to_buy)
-                logger.info(f"买入{shares_to_buy}股{etf}，目标持仓比例: {score_ratio:.2%}")
-                self.current_holdings[etf] = target_shares
-            elif target_shares < current_position:
+            # 如果需要减少持仓，先执行卖出操作
+            if target_shares < current_position:
                 # 卖出一些股票
                 shares_to_sell = current_position - target_shares
                 self.sell(data=data, size=shares_to_sell)
-                logger.info(f"卖出{shares_to_sell}股{etf}，目标持仓比例: {score_ratio:.2%}")
+                logger.info(f"卖出{shares_to_sell}股{etf}，目标持仓比例: {target_weight:.2%}")
                 if target_shares > 0:
                     self.current_holdings[etf] = target_shares
                 else:
                     if etf in self.current_holdings:
                         del self.current_holdings[etf]
+        
+        # 更新当前投资组合价值（卖出操作后）
+        portfolio_value = self.broker.getvalue()
+            
+        # 第二阶段：执行所有买入操作
+        for etf, target_weight in target_weights.items():
+            data = self.getdatabyname(etf)
+            
+            # 计算目标持仓规模
+            position_size = portfolio_value * target_weight
+            
+            # 计算目标股数
+            price = data.close[0]
+            if price <= 0:
+                logger.error(f"无效价格: {etf} 价格={price}")
+                continue
+                
+            target_shares = int(position_size / price)
+            
+            # 获取当前持仓
+            current_position = self.getposition(data).size
+            
+            # 如果需要增加持仓，执行买入操作
+            if target_shares > current_position:
+                # 买入更多股票
+                shares_to_buy = target_shares - current_position
+                self.buy(data=data, size=shares_to_buy)
+                logger.info(f"买入{shares_to_buy}股{etf}，目标持仓比例: {target_weight:.2%}")
+                self.current_holdings[etf] = target_shares
         
         # 只记录在回测时间段内的数据
         current_date = self.data.datetime.date(0)

@@ -1,5 +1,5 @@
 """
-ETF轮动策略V0.2
+ETF轮动策略V2.0
 该策略基于动量和波动率在ETF之间进行轮动。
 它选择具有最高动量（一段时间内的价格变化）
 和最低波动率的ETF。
@@ -18,6 +18,7 @@ import backtrader as bt
 import numpy as np
 import pandas as pd
 from loguru import logger
+from config.config import DEFAULT_BACKTEST_START, DEFAULT_BACKTEST_END
 
 # ETF轮动池
 ETF_POOL = [
@@ -44,7 +45,7 @@ ETF_POOL = [
 ]
 
 
-class ETFRotationStrategy(bt.Strategy):
+class ETFRotationStrategy2(bt.Strategy):
     """
     ETF轮动策略 2.0
     
@@ -57,12 +58,14 @@ class ETFRotationStrategy(bt.Strategy):
     """
     
     params = (
-        ('short_period', 20),      # 短期动量周期
-        ('long_period', 60),       # 长期动量周期
+        ('short_period', 10),      # 短期动量周期
+        ('long_period', 30),       # 长期动量周期
         ('volume_weight', 0.3),    # 成交量在动量计算中的权重
         ('top_n', 3),              # 持有ETF数量
         ('rebalance_days', 5),     # 每N天再平衡一次
         ('benchmark', False),      # 最后一个数据源是否为基准
+        ('start_date', pd.to_datetime(DEFAULT_BACKTEST_START).date()),  # 默认开始日期
+        ('end_date', pd.to_datetime(DEFAULT_BACKTEST_END).date()),      # 默认结束日期
     )
     
     def __init__(self):
@@ -103,6 +106,8 @@ class ETFRotationStrategy(bt.Strategy):
             self.volume[d._name] = bt.indicators.ROC(
                 d.volume, period=self.p.short_period, plot=False
             )
+        
+        self._value_history = []  # 添加净值记录器
     
     def next(self):
         """
@@ -122,7 +127,7 @@ class ETFRotationStrategy(bt.Strategy):
         scores = {}
         for i, d in enumerate(self.datas):
             # 如果最后一个数据源是基准，则跳过
-            if i == len(self.datas) - 1 and hasattr(self.p, 'benchmark') and self.p.benchmark:
+            if i == len(self.datas) - 1 and self.p.benchmark:
                 continue
                 
             # 获取短期和长期动量值
@@ -208,6 +213,19 @@ class ETFRotationStrategy(bt.Strategy):
                 else:
                     if etf in self.current_holdings:
                         del self.current_holdings[etf]
+        
+        # 只记录在回测时间段内的数据
+        current_date = self.data.datetime.date(0)
+        
+        # 添加空值检查
+        if (self.p.start_date is not None and 
+            self.p.end_date is not None and 
+            self.p.start_date <= current_date <= self.p.end_date):
+            
+            self._value_history.append((
+                current_date,
+                self.broker.getvalue()
+            ))
     
     def notify_order(self, order):
         """
